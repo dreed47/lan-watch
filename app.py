@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""LAN watch: how much video Frigate is pulling, and ping loss around it.
+"""Frigate Load: camera traffic into Frigate, and ping health around it.
 
 The bitrate is go2rtc's own byte counter on the Frigate machine. This app SSHes
 there and asks for it. It does not sniff the network. Stream URLs are stripped
@@ -601,7 +601,7 @@ PAGE = r"""<!doctype html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>LAN watch</title>
+<title>Frigate Load</title>
 <style>
   :root {
     --bg: #101114;
@@ -718,8 +718,8 @@ PAGE = r"""<!doctype html>
 <div class="wrap">
   <header>
     <div>
-      <h1>LAN watch</h1>
-      <p class="lead">Use this to see whether Frigate's camera streams are loading the Wi-Fi. The number is how much video Frigate is pulling. The tables are ping loss and reply time for the cameras, and for any other devices you want to watch. Those other devices do not have to be ESP boards.</p>
+      <h1>Frigate Load</h1>
+      <p class="lead">Frigate Load measures the video your Wi-Fi cameras are sending to Frigate, and whether that traffic is making the rest of the network slow to answer.</p>
       <p class="sub" id="status">Loading the latest check.</p>
     </div>
     <div class="pill" id="frigate"><span class="dot"></span><span id="frigate-text">Frigate</span></div>
@@ -744,25 +744,25 @@ PAGE = r"""<!doctype html>
 
   <section class="hero">
     <article class="stat">
-      <div class="k">Camera pull</div>
+      <div class="k">Camera traffic</div>
       <div class="v" id="total">—</div>
-      <p class="note" id="total-note">Video Frigate is taking from the cameras.</p>
+      <p class="note" id="total-note">What Frigate is receiving from the cameras.</p>
     </article>
     <article class="stat">
-      <div class="k">Streams pulling</div>
+      <div class="k">Open streams</div>
       <div class="v" id="stream-count">—</div>
       <p class="note" id="stream-note"></p>
     </article>
     <article class="stat">
-      <div class="k">Slow or lossy</div>
+      <div class="k">Struggling</div>
       <div class="v" id="trouble-count">—</div>
       <p class="note" id="trouble-note"></p>
     </article>
   </section>
 
   <section class="card wide">
-    <h2>Streams</h2>
-    <p class="note">This is the camera traffic Frigate is holding open, sorted by bitrate. One viewer means Frigate itself. A live view adds another.</p>
+    <h2>By camera</h2>
+    <p class="note">Heaviest first. Frigate counts as one viewer. Opening a live view adds a viewer on the stream Frigate already has open.</p>
     <table>
       <thead>
         <tr><th>Stream</th><th class="num">Mbps</th><th class="num">Viewers</th><th class="num">fps</th></tr>
@@ -778,7 +778,7 @@ PAGE = r"""<!doctype html>
   <section class="grid">
     <article class="card" id="other-card">
       <h2>Other devices</h2>
-      <p class="note">Anything else that shares the Wi-Fi: ESP boards, sensors, or other hosts. Add, edit, or remove them here. The list is saved on this server. Worst first. Five pings. Yellow is 10% loss or a reply over 400 ms.</p>
+      <p class="note">Anything else on the network you want to watch alongside the cameras. Add, edit, or remove them here. Worst first. Five pings a check. Yellow is 10% loss, or a reply slower than 400 ms.</p>
       <table>
         <thead><tr><th>Device</th><th class="num">Loss</th><th class="num">Avg reply</th><th></th></tr></thead>
         <tbody id="other"></tbody>
@@ -791,8 +791,8 @@ PAGE = r"""<!doctype html>
       <p class="note" id="device-msg"></p>
     </article>
     <article class="card">
-      <h2>Cameras</h2>
-      <p class="note">Taken from Frigate on each check. The address is read on that machine and only the address is kept. Worst first. Five pings. A short sample can show 0% loss when a longer test would not.</p>
+      <h2>Camera ping</h2>
+      <p class="note">The cameras Frigate knows about. This ping is separate from the traffic number above. Worst first. Five pings a check, so a quiet result can still hide loss that a longer test would catch.</p>
       <table>
         <thead><tr><th>Device</th><th class="num">Loss</th><th class="num">Avg reply</th></tr></thead>
         <tbody id="cameras"></tbody>
@@ -801,7 +801,7 @@ PAGE = r"""<!doctype html>
   </section>
 
   <section class="card wide">
-    <h2>Recent camera pull</h2>
+    <h2>Recent traffic</h2>
     <p class="note" id="history-note">Newest on the right.</p>
     <div class="bars" id="bars"></div>
   </section>
@@ -903,7 +903,7 @@ function renderStreams(data) {
   body.replaceChildren();
   if (!pulling.length) {
     const tr = document.createElement("tr");
-    const td = cell("No streams are pulling.", "");
+    const td = cell("No cameras are sending video right now.", "");
     td.colSpan = 4;
     tr.appendChild(td);
     body.appendChild(tr);
@@ -938,10 +938,10 @@ function renderHistory(history) {
   bars.replaceChildren();
   const max = Math.max(0.1, ...rows.map(h => h.total_mbps || 0));
   if (!rows.length) {
-    text("history-note", "No checks stored yet.");
+    text("history-note", "No measurements stored yet.");
     return;
   }
-  text("history-note", "Last " + rows.length + " checks. Newest on the right. Hover a bar for the time.");
+  text("history-note", "Last " + rows.length + " measurements, newest on the right. Point at a bar for the time.");
   for (const row of rows) {
     const bar = document.createElement("span");
     const value = row.ok ? (row.total_mbps || 0) : 0;
@@ -1001,14 +1001,14 @@ function renderStatus(data) {
     totalEl.appendChild(unit);
   }
   const sample = settings.sample_seconds || 10;
-  text("total-note", "Video Frigate took from the cameras over " + sample + " seconds" + (settings.enabled ? "" : " · checks paused"));
+  text("total-note", "Received by Frigate over " + sample + " seconds" + (settings.enabled ? "" : " · monitoring paused"));
   document.getElementById("now").disabled = !!state.checking;
 }
 function renderTrouble(data) {
   const rows = (data.pings || []).filter(row => tone(row));
   text("trouble-count", String(rows.length));
   if (!rows.length) {
-    text("trouble-note", data.pings && data.pings.length ? "Replies look ordinary" : "Waiting for pings");
+    text("trouble-note", data.pings && data.pings.length ? "Nothing looks slow or lossy" : "Waiting for pings");
     return;
   }
   text("trouble-note", rows.slice(0, 3).map(row => row.name).join(", "));
@@ -1022,7 +1022,7 @@ function syncControls(settings) {
   const input = document.getElementById("custom-seconds");
   if (document.activeElement !== input) input.value = settings.poll_seconds;
   const sample = settings.sample_seconds || 10;
-  text("hint", "Each check reads Frigate's camera pull for " + sample + " seconds, then pings every listed device. Checks start this often. The choice is saved on this server. The page itself refreshes every few seconds.");
+  text("hint", "A check measures camera traffic for " + sample + " seconds, then pings every camera and every other device. Checks start this often. The page updates on its own.");
 }
 function render(data) {
   latest = data;
@@ -1142,7 +1142,7 @@ async function load() {
     if (!response.ok) throw new Error("status " + response.status);
     render(await response.json());
   } catch (err) {
-    text("status", "The page cannot reach LAN watch.");
+    text("status", "The page cannot reach Frigate Load.");
   }
 }
 async function save(body) {
