@@ -1,0 +1,22 @@
+services:
+  lan-watch:
+    build: .
+    container_name: lan-watch
+    restart: unless-stopped
+    env_file: .env
+    volumes:
+      - ./data:/data
+      - ./ssh/id_ed25519:/run/ssh/id_ed25519:ro
+    ports:
+      - "${PORT:-7852}:5000"
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "3"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:5000/health')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
