@@ -24,9 +24,9 @@ cp example-devices.json devices.json
 
 `FRIGATE_HOST` is the machine running Frigate. `FRIGATE_USER` is the SSH user on that machine. `.env`, `ssh/`, and `devices.json` are not in git.
 
-`devices.json` is only the other-device list, under `other`. Each item is a `name` and an `ip`. An older file may say `esp` instead of `other`. That still works. A `cameras` list in that file is ignored, because the camera list comes from Frigate. `example-devices.json` shows the shape.
+`devices.json` is the starting other-device list, under `other`. Each item is a `name` and an `ip`. An older file may say `esp` instead of `other`. That still works. A `cameras` list in that file is ignored, because the camera list comes from Frigate. `example-devices.json` shows the shape.
 
-The image copies `devices.json` when it builds. A list change needs `./restart_container.sh` before the page sees it.
+The first run copies that file to `data/devices.json`. Add, edit, and remove on the page write that copy. Those changes stay across a restart and do not need a rebuild.
 
 The page listens on port 7852. Inside the container the app uses port 5000. The Docker health check calls `/health`.
 

@@ -9,6 +9,7 @@ camera password.
 
 import json
 import os
+import re
 import sqlite3
 import subprocess
 import threading
@@ -29,6 +30,8 @@ TZ = ZoneInfo(os.environ.get("TZ", "America/New_York"))
 DATA = Path(os.environ.get("DATA_DIR", "/data"))
 DB_PATH = DATA / "lan-watch.db"
 DEVICES_PATH = Path(os.environ.get("DEVICES_FILE", "/app/devices.json"))
+LIVE_DEVICES = DATA / "devices.json"
+_devices_lock = threading.Lock()
 POLL_MIN = 30
 POLL_MAX = 3600
 PRESETS = (30, 60, 120, 300, 900)
@@ -259,17 +262,105 @@ def _update_settings(body):
     return _load_settings()
 
 
+def _ensure_devices_file():
+    DATA.mkdir(parents=True, exist_ok=True)
+    if LIVE_DEVICES.exists():
+        return
+    if DEVICES_PATH.exists() and DEVICES_PATH.resolve() != LIVE_DEVICES.resolve():
+        LIVE_DEVICES.write_text(DEVICES_PATH.read_text())
+    else:
+        LIVE_DEVICES.write_text('{"other": []}\n')
+
+
+def _other_items(data):
+    if "other" in data:
+        return data.get("other") or []
+    return data.get("esp") or []
+
+
+def _clean_name(value):
+    if not isinstance(value, str):
+        raise ValueError("Use a short name made of letters, numbers, dashes, or underscores.")
+    name = value.strip()
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,39}", name):
+        raise ValueError("Use a short name made of letters, numbers, dashes, or underscores.")
+    return name
+
+
+def _clean_ip(value):
+    if not isinstance(value, str):
+        raise ValueError("Enter an IPv4 address.")
+    ip = value.strip()
+    parts = ip.split(".")
+    if len(parts) != 4:
+        raise ValueError("Enter an IPv4 address.")
+    try:
+        ok = all(part.isdigit() and not (len(part) > 1 and part.startswith("0")) and 0 <= int(part) <= 255 for part in parts)
+    except ValueError:
+        ok = False
+    if not ok:
+        raise ValueError("Enter an IPv4 address.")
+    return ip
+
+
 def _load_devices():
     try:
-        data = json.loads(DEVICES_PATH.read_text())
+        with _devices_lock:
+            _ensure_devices_file()
+            data = json.loads(LIVE_DEVICES.read_text())
     except Exception as exc:
         return [], str(exc)
     devices = []
-    # Cameras come from Frigate. "esp" is the old key for the other list.
-    for key in ("other", "esp"):
-        for item in data.get(key) or []:
-            devices.append({"kind": "other", "name": item["name"], "ip": item["ip"]})
+    for item in _other_items(data):
+        if isinstance(item, dict) and item.get("name") and item.get("ip"):
+            devices.append({"kind": "other", "name": str(item["name"]), "ip": str(item["ip"])})
     return devices, None
+
+
+def _change_device(body):
+    if not isinstance(body, dict):
+        raise ValueError("Could not read that change.")
+    action = body.get("action")
+    if action not in ("add", "update", "delete"):
+        raise ValueError("Use add, update, or delete.")
+    name = _clean_name(body.get("name"))
+    with _devices_lock:
+        _ensure_devices_file()
+        data = json.loads(LIVE_DEVICES.read_text())
+        items = []
+        for item in _other_items(data):
+            if isinstance(item, dict) and item.get("name") and item.get("ip"):
+                items.append({"name": str(item["name"]), "ip": str(item["ip"])})
+        if action == "delete":
+            if not any(item["name"] == name for item in items):
+                raise ValueError("That device is not in the list.")
+            items = [item for item in items if item["name"] != name]
+        else:
+            ip = _clean_ip(body.get("ip"))
+            new_name = name if action == "add" else _clean_name(body.get("new_name") or name)
+            if any(item["name"] == new_name and item["name"] != name for item in items):
+                raise ValueError("That name is already in the list.")
+            if action == "add" and any(item["name"] == name for item in items):
+                raise ValueError("That name is already in the list.")
+            if any(item["ip"] == ip and item["name"] != name for item in items):
+                raise ValueError("That address is already in the list.")
+            if action == "add":
+                items.append({"name": name, "ip": ip})
+            else:
+                found = False
+                for item in items:
+                    if item["name"] == name:
+                        item["name"] = new_name
+                        item["ip"] = ip
+                        found = True
+                if not found:
+                    raise ValueError("That device is not in the list.")
+        data.pop("esp", None)
+        data["other"] = items
+        temporary = LIVE_DEVICES.with_suffix(".json.tmp")
+        temporary.write_text(json.dumps(data, indent=2) + "\n")
+        temporary.replace(LIVE_DEVICES)
+    return items
 
 
 def _ssh_sample():
@@ -499,6 +590,9 @@ def _view():
     payload["history"] = _recent()
     payload["settings"] = _load_settings()
     payload["state"] = state
+    devices, devices_error = _load_devices()
+    payload["other_devices"] = [{"name": item["name"], "ip": item["ip"]} for item in devices]
+    payload["devices_error"] = devices_error
     return payload
 
 
@@ -567,10 +661,15 @@ PAGE = r"""<!doctype html>
   button.active { background: #243044; border-color: #446089; color: var(--accent); }
   button:disabled { opacity: 0.45; cursor: default; }
   .custom { display: flex; gap: 0.35rem; align-items: center; }
-  .custom input {
-    width: 5.2rem; background: #121318; color: var(--text); border: 1px solid var(--line);
-    border-radius: 999px; padding: 0.35rem 0.7rem; font: inherit;
+  .custom input, .add-device input, #other input {
+    background: #121318; color: var(--text); border: 1px solid var(--line);
+    border-radius: 8px; padding: 0.35rem 0.55rem; font: inherit;
   }
+  .custom input { width: 5.2rem; border-radius: 999px; padding: 0.35rem 0.7rem; }
+  .add-device { display: flex; flex-wrap: wrap; gap: 0.4rem; margin-top: 0.75rem; }
+  .add-device input { min-width: 8rem; flex: 1; }
+  #other button.danger { color: var(--bad); }
+  #device-msg:empty { display: none; }
   .hint { flex-basis: 100%; color: var(--muted); font-size: 0.86rem; }
   .banner {
     border-radius: 12px; padding: 0.65rem 0.85rem; margin-bottom: 0.75rem;
@@ -677,13 +776,19 @@ PAGE = r"""<!doctype html>
   </section>
 
   <section class="grid">
-    <article class="card">
+    <article class="card" id="other-card">
       <h2>Other devices</h2>
-      <p class="note">Anything else that shares the Wi-Fi: ESP boards, sensors, or other hosts. Worst first. Five pings from this container. Yellow is 10% loss or a reply over 400 ms.</p>
+      <p class="note">Anything else that shares the Wi-Fi: ESP boards, sensors, or other hosts. Add, edit, or remove them here. The list is saved on this server. Worst first. Five pings. Yellow is 10% loss or a reply over 400 ms.</p>
       <table>
-        <thead><tr><th>Device</th><th class="num">Loss</th><th class="num">Avg reply</th></tr></thead>
+        <thead><tr><th>Device</th><th class="num">Loss</th><th class="num">Avg reply</th><th></th></tr></thead>
         <tbody id="other"></tbody>
       </table>
+      <form class="add-device" id="add-device">
+        <input id="add-name" placeholder="Name" aria-label="New device name" autocomplete="off">
+        <input id="add-ip" placeholder="192.168.1.30" aria-label="New device address" autocomplete="off" inputmode="decimal">
+        <button type="submit">Add</button>
+      </form>
+      <p class="note" id="device-msg"></p>
     </article>
     <article class="card">
       <h2>Cameras</h2>
@@ -929,10 +1034,107 @@ function render(data) {
   renderStatus(data);
   renderBanner(data);
   renderStreams(data);
-  renderPings("other", (data.pings || []).filter(row => row.kind === "other" || row.kind === "esp"));
+  renderOther(data);
   renderPings("cameras", (data.pings || []).filter(row => row.kind === "cameras"), "Frigate did not report any cameras.");
   renderTrouble(data);
   renderHistory(data.history || []);
+}
+let forceOther = false;
+function renderOther(data) {
+  const body = document.getElementById("other");
+  if (!forceOther && body.contains(document.activeElement)) return;
+  forceOther = false;
+  const byName = {};
+  for (const row of data.pings || []) {
+    if (row.kind === "other" || row.kind === "esp") byName[row.name] = row;
+  }
+  const configured = (data.other_devices || []).map(item => {
+    const ping = byName[item.name] || {};
+    return {name: item.name, ip: item.ip, loss: ping.loss == null ? null : ping.loss, avg_ms: ping.avg_ms == null ? null : ping.avg_ms};
+  });
+  body.replaceChildren();
+  if (!configured.length) {
+    const tr = document.createElement("tr");
+    const td = cell("No other devices yet.", "");
+    td.colSpan = 4;
+    tr.appendChild(td);
+    body.appendChild(tr);
+    return;
+  }
+  for (const row of sortPings(configured)) {
+    const tr = document.createElement("tr");
+    const name = document.createElement("td");
+    name.textContent = row.name;
+    const ip = document.createElement("span");
+    ip.className = "ip";
+    ip.textContent = row.ip;
+    name.appendChild(ip);
+    tr.appendChild(name);
+    tr.appendChild(cell(row.loss == null ? "—" : Math.round(row.loss) + "%", pingClass(row, "loss")));
+    tr.appendChild(cell(row.avg_ms == null ? "—" : Math.round(row.avg_ms) + " ms", pingClass(row, "avg")));
+    const actions = document.createElement("td");
+    actions.className = "num";
+    const edit = document.createElement("button");
+    edit.type = "button";
+    edit.textContent = "Edit";
+    edit.addEventListener("click", () => startEdit(tr, row));
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.className = "danger";
+    remove.textContent = "Remove";
+    remove.addEventListener("click", () => changeDevice({action: "delete", name: row.name}));
+    actions.append(edit, remove);
+    tr.appendChild(actions);
+    body.appendChild(tr);
+  }
+}
+function startEdit(tr, row) {
+  tr.replaceChildren();
+  const nameCell = document.createElement("td");
+  const nameInput = document.createElement("input");
+  nameInput.value = row.name;
+  nameInput.setAttribute("aria-label", "Device name");
+  nameCell.appendChild(nameInput);
+  const ipCell = document.createElement("td");
+  ipCell.colSpan = 2;
+  const ipInput = document.createElement("input");
+  ipInput.value = row.ip;
+  ipInput.setAttribute("aria-label", "Device address");
+  ipCell.appendChild(ipInput);
+  const actions = document.createElement("td");
+  actions.className = "num";
+  const saveBtn = document.createElement("button");
+  saveBtn.type = "button";
+  saveBtn.textContent = "Save";
+  saveBtn.addEventListener("click", () => changeDevice({
+    action: "update", name: row.name, new_name: nameInput.value, ip: ipInput.value,
+  }));
+  const cancel = document.createElement("button");
+  cancel.type = "button";
+  cancel.textContent = "Cancel";
+  cancel.addEventListener("click", () => { forceOther = true; load(); });
+  actions.append(saveBtn, cancel);
+  tr.append(nameCell, ipCell, actions);
+  nameInput.focus();
+}
+async function changeDevice(body) {
+  const msg = document.getElementById("device-msg");
+  const response = await fetch("/api/devices", {
+    method: "POST",
+    headers: {"Content-Type": "application/json"},
+    body: JSON.stringify(body),
+  });
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    msg.textContent = payload.error || "Could not change the list.";
+    return false;
+  }
+  msg.textContent = body.action === "delete" ? "Removed. A check is starting." : "Saved. A check is starting.";
+  forceOther = true;
+  document.getElementById("add-name").value = body.action === "add" ? "" : document.getElementById("add-name").value;
+  document.getElementById("add-ip").value = body.action === "add" ? "" : document.getElementById("add-ip").value;
+  await load();
+  return true;
 }
 async function load() {
   try {
@@ -976,6 +1178,14 @@ document.getElementById("custom").addEventListener("submit", (event) => {
   event.preventDefault();
   save({poll_seconds: Number(document.getElementById("custom-seconds").value)});
 });
+document.getElementById("add-device").addEventListener("submit", (event) => {
+  event.preventDefault();
+  changeDevice({
+    action: "add",
+    name: document.getElementById("add-name").value,
+    ip: document.getElementById("add-ip").value,
+  });
+});
 document.getElementById("now").addEventListener("click", async () => {
   document.getElementById("now").disabled = true;
   await fetch("/api/check", {method: "POST"});
@@ -1016,6 +1226,20 @@ def update_settings():
     return jsonify(saved)
 
 
+@app.post("/api/devices")
+def change_device():
+    body = request.get_json(silent=True) or {}
+    try:
+        items = _change_device(body)
+    except ValueError as exc:
+        return jsonify(ok=False, error=str(exc)), 400
+    global _once
+    with _lock:
+        _once = True
+    _wake.set()
+    return jsonify(ok=True, devices=items)
+
+
 @app.post("/api/check")
 def check_now():
     global _once
@@ -1032,6 +1256,7 @@ def index():
 
 def main():
     _ensure_settings()
+    _ensure_devices_file()
     threading.Thread(target=_loop, daemon=True).start()
     app.run(host="0.0.0.0", port=5000, threaded=True)
 
