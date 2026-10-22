@@ -24,6 +24,8 @@ Camera names and addresses come from Frigate on each check. `devices.json` is on
 
 The first run copies that file to `data/devices.json`. Add, edit, and remove on the page write that copy. Those changes stay across a restart and do not need a rebuild.
 
+The page can also suggest devices from Home Assistant. It looks on the network for Home Assistant, or uses `HA_URL`. A long-lived access token from the Home Assistant profile page is required before any devices are read. Set `HA_TOKEN` in `.env`, or paste the token on the page. The token is stored in `data/ha.json` and is not returned to the browser. Suggestions put ESP devices first, then other Home Assistant devices that have an address. Home Assistant only supplies an address when the device page has a link to it. ESPHome adds that link when the device web server is on. A name ending in .local is resolved on the network. Cameras Frigate already reports, and devices already being watched, are left out. Nothing is added until someone selects it.
+
 The page listens on port 7852. Inside the container the app uses port 5000. The Docker health check calls `/health`.
 
 Measurements start every 60 seconds until someone changes that on the page. Each one reads camera traffic for 10 seconds, then sends 5 pings. The page can pause measuring or set the gap from 30 seconds to 1 hour. That choice is stored in `data/lan-watch.db` and kept across restarts. The page refreshes itself every few seconds. That refresh is separate from the measurement gap.

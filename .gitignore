@@ -1,4 +1,6 @@
 .env
 data/*.db
+data/ha.json
+data/*.tmp
 ssh/
 devices.json

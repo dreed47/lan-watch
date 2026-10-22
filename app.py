@@ -10,12 +10,17 @@ camera password.
 import json
 import os
 import re
+import socket
 import sqlite3
+import ssl
 import subprocess
 import threading
 import time
+import urllib.error
+import urllib.request
 from datetime import datetime, timedelta
 from pathlib import Path
+from urllib.parse import urlparse
 from zoneinfo import ZoneInfo
 
 from flask import Flask, jsonify, request
@@ -31,7 +36,9 @@ DATA = Path(os.environ.get("DATA_DIR", "/data"))
 DB_PATH = DATA / "lan-watch.db"
 DEVICES_PATH = Path(os.environ.get("DEVICES_FILE", "/app/devices.json"))
 LIVE_DEVICES = DATA / "devices.json"
+HA_FILE = DATA / "ha.json"
 _devices_lock = threading.Lock()
+_mdns_lock = threading.Lock()
 POLL_MIN = 30
 POLL_MAX = 3600
 PRESETS = (30, 60, 120, 300, 900)
@@ -321,9 +328,9 @@ def _change_device(body):
     if not isinstance(body, dict):
         raise ValueError("Could not read that change.")
     action = body.get("action")
-    if action not in ("add", "update", "delete"):
+    if action not in ("add", "update", "delete", "add_many"):
         raise ValueError("Use add, update, or delete.")
-    name = _clean_name(body.get("name"))
+    name = None if action == "add_many" else _clean_name(body.get("name"))
     with _devices_lock:
         _ensure_devices_file()
         data = json.loads(LIVE_DEVICES.read_text())
@@ -331,7 +338,26 @@ def _change_device(body):
         for item in _other_items(data):
             if isinstance(item, dict) and item.get("name") and item.get("ip"):
                 items.append({"name": str(item["name"]), "ip": str(item["ip"])})
-        if action == "delete":
+        if action == "add_many":
+            incoming = body.get("devices")
+            if not isinstance(incoming, list) or not incoming:
+                raise ValueError("Choose at least one device.")
+            added = 0
+            for raw in incoming:
+                if not isinstance(raw, dict):
+                    continue
+                try:
+                    new_name = _clean_name(raw.get("name"))
+                    ip = _clean_ip(raw.get("ip"))
+                except ValueError:
+                    continue
+                if any(item["name"] == new_name or item["ip"] == ip for item in items):
+                    continue
+                items.append({"name": new_name, "ip": ip})
+                added += 1
+            if added == 0:
+                raise ValueError("Those devices are already in the list.")
+        elif action == "delete":
             if not any(item["name"] == name for item in items):
                 raise ValueError("That device is not in the list.")
             items = [item for item in items if item["name"] != name]
@@ -361,6 +387,306 @@ def _change_device(body):
         temporary.write_text(json.dumps(data, indent=2) + "\n")
         temporary.replace(LIVE_DEVICES)
     return items
+
+
+def _is_ipv4(value):
+    if not isinstance(value, str):
+        return False
+    parts = value.split(".")
+    if len(parts) != 4:
+        return False
+    try:
+        return all(
+            part.isdigit() and not (len(part) > 1 and part.startswith("0")) and 0 <= int(part) <= 255
+            for part in parts
+        )
+    except ValueError:
+        return False
+
+
+def _usable_ipv4(value):
+    if not _is_ipv4(value):
+        return False
+    if value.startswith("127.") or value.startswith("0.") or value.startswith("169.254."):
+        return False
+    return True
+
+
+def _resolve_ipv4(host):
+    if not host or host in ("localhost",):
+        return None
+    if _is_ipv4(host):
+        return host if _usable_ipv4(host) else None
+    try:
+        infos = socket.getaddrinfo(host, None, socket.AF_INET, socket.SOCK_STREAM)
+    except socket.gaierror:
+        infos = []
+    for info in infos:
+        ip = info[4][0]
+        if _usable_ipv4(ip):
+            return ip
+    if host.endswith(".local"):
+        return _resolve_mdns(host)
+    return None
+
+
+def _resolve_mdns(host):
+    """Ask mDNS for a .local name. Docker has no local resolver for those."""
+    try:
+        from zeroconf import AddressResolver, IPVersion, Zeroconf
+    except Exception:
+        return None
+    name = host if host.endswith(".") else host + "."
+    with _mdns_lock:
+        try:
+            zc = Zeroconf()
+        except Exception:
+            return None
+        try:
+            resolver = AddressResolver(name)
+            if not resolver.request(zc, 1500):
+                return None
+            for ip in resolver.parsed_addresses(IPVersion.V4Only):
+                if _usable_ipv4(ip):
+                    return ip
+        except Exception:
+            return None
+        finally:
+            zc.close()
+    return None
+
+
+def _slug_name(value):
+    slug = re.sub(r"[^A-Za-z0-9]+", "-", str(value or "").strip()).strip("-").lower()
+    slug = slug[:40].strip("-")
+    if not slug or not slug[0].isalnum():
+        return ""
+    return slug
+
+
+def _host_from_url(value):
+    if not isinstance(value, str) or "://" not in value:
+        return None
+    try:
+        parsed = urlparse(value)
+    except ValueError:
+        return None
+    if parsed.scheme not in ("http", "https"):
+        return None
+    return parsed.hostname
+
+
+def _is_esp_device(device):
+    for ident in device.get("identifiers") or []:
+        if isinstance(ident, (list, tuple)) and ident and ident[0] == "esphome":
+            return True
+    manufacturer = str(device.get("manufacturer") or "").lower()
+    model = str(device.get("model") or "").lower()
+    return "espressif" in manufacturer or "esp32" in model or "esp8266" in model
+
+
+def _classify_ha_devices(devices, taken_ips, taken_names):
+    esp = []
+    other = []
+    used_names = set(taken_names)
+    for device in devices or []:
+        if not isinstance(device, dict) or device.get("disabled_by"):
+            continue
+        host = _host_from_url(device.get("configuration_url"))
+        ip = _resolve_ipv4(host)
+        if not ip or ip in taken_ips:
+            continue
+        label = device.get("name_by_user") or device.get("name") or host
+        slug = _slug_name(label)
+        if not slug:
+            continue
+        name = slug
+        suffix = 2
+        while name in used_names:
+            extra = f"-{suffix}"
+            name = slug[: 40 - len(extra)] + extra
+            suffix += 1
+        used_names.add(name)
+        taken_ips.add(ip)
+        detail = device.get("model") or device.get("manufacturer") or ""
+        if detail == label:
+            detail = ""
+        item = {"name": name, "label": str(label), "ip": ip, "detail": str(detail)}
+        (esp if _is_esp_device(device) else other).append(item)
+    esp.sort(key=lambda item: item["label"].lower())
+    other.sort(key=lambda item: item["label"].lower())
+    return esp, other
+
+
+def _clean_ha_url(value):
+    if not isinstance(value, str):
+        raise ValueError("Enter the Home Assistant address, including http:// or https://.")
+    url = value.strip().rstrip("/")
+    parsed = urlparse(url)
+    if parsed.scheme not in ("http", "https") or not parsed.hostname:
+        raise ValueError("Enter the Home Assistant address, including http:// or https://.")
+    return url
+
+
+def _load_ha():
+    url = os.environ.get("HA_URL", "").strip().rstrip("/")
+    token = os.environ.get("HA_TOKEN", "").strip()
+    if HA_FILE.exists():
+        try:
+            saved = json.loads(HA_FILE.read_text())
+        except (OSError, json.JSONDecodeError):
+            saved = {}
+        if isinstance(saved, dict):
+            if saved.get("url"):
+                url = str(saved["url"]).strip().rstrip("/")
+            if saved.get("token"):
+                token = str(saved["token"]).strip()
+    return {"url": url, "token": token}
+
+
+def _save_ha(url, token):
+    url = _clean_ha_url(url)
+    current = _load_ha()
+    if token is None or (isinstance(token, str) and not token.strip()):
+        token = current["token"]
+    else:
+        token = str(token).strip()
+    if len(token) < 20:
+        raise ValueError("Paste a long-lived access token from the Home Assistant profile page.")
+    if not _probe_ha(url):
+        raise ValueError("That address did not answer as Home Assistant.")
+    DATA.mkdir(parents=True, exist_ok=True)
+    temporary = HA_FILE.with_suffix(".json.tmp")
+    temporary.write_text(json.dumps({"url": url, "token": token}) + "\n")
+    temporary.replace(HA_FILE)
+    os.chmod(HA_FILE, 0o600)
+    return {"url": url, "token_set": True}
+
+
+def _redact(text, token):
+    if token and token in text:
+        text = text.replace(token, "token")
+    return text[:300]
+
+
+def _probe_ha(url):
+    # Home networks often use a certificate this container does not trust.
+    context = ssl._create_unverified_context()
+    try:
+        request_url = urllib.request.Request(url.rstrip("/") + "/api/", method="GET")
+        with urllib.request.urlopen(request_url, timeout=4, context=context) as response:
+            body = response.read().decode(errors="replace")
+            return response.status == 200 and "API running" in body
+    except urllib.error.HTTPError as exc:
+        body = exc.read().decode(errors="replace")
+        return exc.code == 401 and "API running" in body
+    except (OSError, urllib.error.URLError):
+        return False
+
+
+def _ha_from_service(info):
+    props = {}
+    for key, value in (info.properties or {}).items():
+        try:
+            text_key = key.decode() if isinstance(key, bytes) else str(key)
+            text_value = value.decode(errors="replace") if isinstance(value, bytes) else str(value)
+        except Exception:
+            continue
+        props[text_key] = text_value
+    label = props.get("location_name") or "Home Assistant"
+    direct = props.get("internal_url") or props.get("base_url") or ""
+    if direct.startswith("http"):
+        return {"url": direct.rstrip("/"), "name": label}
+    addresses = [item for item in info.parsed_addresses() if _usable_ipv4(item)]
+    if not addresses:
+        return None
+    port = info.port or 8123
+    return {"url": f"http://{addresses[0]}:{port}", "name": label}
+
+
+def _discover_ha_mdns():
+    from zeroconf import ServiceBrowser, Zeroconf
+
+    names = []
+    service = "_home-assistant._tcp.local."
+
+    class _Listener:
+        def add_service(self, zc, type_, name):
+            names.append(name)
+
+        def update_service(self, zc, type_, name):
+            return None
+
+        def remove_service(self, zc, type_, name):
+            return None
+
+    # Resolve after the browse. get_service_info inside the callback can stall.
+    with _mdns_lock:
+        zc = Zeroconf()
+        try:
+            ServiceBrowser(zc, service, _Listener())
+            time.sleep(2.5)
+            found = []
+            for name in names:
+                info = zc.get_service_info(service, name, timeout=1000)
+                if info is None:
+                    continue
+                item = _ha_from_service(info)
+                if item:
+                    found.append(item)
+            return found
+        finally:
+            zc.close()
+
+
+def _discover_ha():
+    try:
+        found = _discover_ha_mdns()
+    except Exception:
+        found = []
+    if found:
+        return found
+    ip = _resolve_ipv4("homeassistant.local")
+    url = f"http://{ip}:8123" if ip else ""
+    if url and _probe_ha(url):
+        return [{"url": url, "name": "Home Assistant"}]
+    return []
+
+
+def _ha_device_registry(url, token):
+    from websocket import create_connection
+
+    parsed = urlparse(url)
+    scheme = "wss" if parsed.scheme == "https" else "ws"
+    port = parsed.port or (443 if scheme == "wss" else 80)
+    path = (parsed.path or "").rstrip("/")
+    ws_url = f"{scheme}://{parsed.hostname}:{port}{path}/api/websocket"
+    options = {}
+    if scheme == "wss":
+        options["sslopt"] = {"cert_reqs": ssl.CERT_NONE}
+    ws = create_connection(ws_url, timeout=8, **options)
+    ws.settimeout(8)
+    try:
+        hello = json.loads(ws.recv())
+        if hello.get("type") != "auth_required":
+            raise RuntimeError("Home Assistant did not ask for a token.")
+        ws.send(json.dumps({"type": "auth", "access_token": token}))
+        auth = json.loads(ws.recv())
+        if auth.get("type") != "auth_ok":
+            raise RuntimeError("Home Assistant rejected the token.")
+        ws.send(json.dumps({"id": 1, "type": "config/device_registry/list"}))
+        while True:
+            message = json.loads(ws.recv())
+            if message.get("id") != 1:
+                continue
+            if not message.get("success"):
+                error = message.get("error") or {}
+                if error.get("code") == "unauthorized":
+                    raise RuntimeError("That token cannot list devices. Create it from an owner account.")
+                raise RuntimeError("Home Assistant did not return its devices.")
+            return message.get("result") or []
+    finally:
+        ws.close()
 
 
 def _ssh_sample():
@@ -666,8 +992,14 @@ PAGE = r"""<!doctype html>
     border-radius: 8px; padding: 0.35rem 0.55rem; font: inherit;
   }
   .custom input { width: 5.2rem; border-radius: 999px; padding: 0.35rem 0.7rem; }
-  .add-device { display: flex; flex-wrap: wrap; gap: 0.4rem; margin-top: 0.75rem; }
-  .add-device input { min-width: 8rem; flex: 1; }
+  .add-device, .ha-setup { display: flex; flex-wrap: wrap; gap: 0.4rem; margin-top: 0.75rem; }
+  .add-device input, .ha-setup input { min-width: 8rem; flex: 1; }
+  .ha { margin-top: 0.9rem; padding-top: 0.75rem; border-top: 1px solid var(--line); }
+  .ha-actions { display: flex; flex-wrap: wrap; gap: 0.4rem; }
+  .suggest { margin-top: 0.55rem; }
+  .suggest h3 { margin: 0.55rem 0 0.15rem; font-size: 0.82rem; font-weight: 650; letter-spacing: 0.04em; text-transform: uppercase; color: var(--muted); }
+  .suggest label { display: flex; gap: 0.45rem; align-items: baseline; padding: 0.18rem 0; }
+  .suggest .meta { color: var(--muted); font-size: 0.8rem; }
   #other button.danger { color: var(--bad); }
   #device-msg:empty { display: none; }
   .hint { flex-basis: 100%; color: var(--muted); font-size: 0.86rem; }
@@ -789,6 +1121,19 @@ PAGE = r"""<!doctype html>
         <button type="submit">Add</button>
       </form>
       <p class="note" id="device-msg"></p>
+      <div class="ha">
+        <div class="ha-actions">
+          <button type="button" id="ha-suggest">Suggest from Home Assistant</button>
+          <button type="button" id="ha-find">Find Home Assistant</button>
+        </div>
+        <form class="ha-setup" id="ha-setup" hidden>
+          <input id="ha-url" placeholder="http://192.168.1.2:8123" aria-label="Home Assistant address" autocomplete="off">
+          <input id="ha-token" type="password" placeholder="Long-lived token" aria-label="Home Assistant token" autocomplete="off">
+          <button type="submit">Save</button>
+        </form>
+        <p class="note" id="ha-msg"></p>
+        <div class="suggest" id="ha-results"></div>
+      </div>
     </article>
     <article class="card">
       <h2>Camera ping</h2>
@@ -1186,6 +1531,106 @@ document.getElementById("add-device").addEventListener("submit", (event) => {
     ip: document.getElementById("add-ip").value,
   });
 });
+function haMessage(value) {
+  text("ha-msg", value || "");
+}
+function renderSuggestions(payload) {
+  const box = document.getElementById("ha-results");
+  box.replaceChildren();
+  const groups = [
+    ["ESP devices", payload.esp || []],
+    ["Other Home Assistant devices", payload.other || []],
+  ];
+  const any = groups.some(([, rows]) => rows.length);
+  if (!any) return;
+  for (const [title, rows] of groups) {
+    if (!rows.length) continue;
+    const heading = document.createElement("h3");
+    heading.textContent = title;
+    box.appendChild(heading);
+    for (const row of rows) {
+      const label = document.createElement("label");
+      const input = document.createElement("input");
+      input.type = "checkbox";
+      input.checked = true;
+      input.dataset.name = row.name;
+      input.dataset.ip = row.ip;
+      label.appendChild(input);
+      const words = document.createElement("span");
+      words.textContent = row.label + "  " + row.ip;
+      label.appendChild(words);
+      if (row.detail) {
+        const meta = document.createElement("span");
+        meta.className = "meta";
+        meta.textContent = row.detail;
+        label.appendChild(meta);
+      }
+      box.appendChild(label);
+    }
+  }
+  const add = document.createElement("button");
+  add.type = "button";
+  add.textContent = "Add selected";
+  add.addEventListener("click", async () => {
+    const devices = [...box.querySelectorAll("input:checked")].map(input => ({
+      name: input.dataset.name,
+      ip: input.dataset.ip,
+    }));
+    if (!devices.length) {
+      haMessage("Select at least one device.");
+      return;
+    }
+    const ok = await changeDevice({action: "add_many", devices: devices});
+    if (ok) {
+      box.replaceChildren();
+      haMessage("Added. A check is starting.");
+    }
+  });
+  box.appendChild(add);
+}
+document.getElementById("ha-find").addEventListener("click", async () => {
+  haMessage("Looking for Home Assistant.");
+  const response = await fetch("/api/ha/discover", {cache: "no-store"});
+  const payload = await response.json().catch(() => ({}));
+  document.getElementById("ha-setup").hidden = false;
+  if (payload.url) document.getElementById("ha-url").value = payload.url;
+  haMessage(payload.found ? "Found " + (payload.name || "Home Assistant") + ". Paste a long-lived token." : (payload.error || "No Home Assistant answered. Type its address."));
+});
+document.getElementById("ha-suggest").addEventListener("click", async () => {
+  haMessage("Asking Home Assistant.");
+  const response = await fetch("/api/ha/suggestions", {cache: "no-store"});
+  const payload = await response.json().catch(() => ({}));
+  if (payload.url) document.getElementById("ha-url").value = payload.url;
+  if (!response.ok) {
+    document.getElementById("ha-setup").hidden = false;
+    haMessage(payload.error || "Could not read devices.");
+    renderSuggestions(payload);
+    return;
+  }
+  const count = (payload.esp || []).length + (payload.other || []).length;
+  haMessage(count ? "ESP devices are listed first. Already watched devices are hidden." : "Home Assistant had no new devices with an address.");
+  renderSuggestions(payload);
+});
+document.getElementById("ha-setup").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  haMessage("Saving Home Assistant.");
+  const response = await fetch("/api/ha", {
+    method: "POST",
+    headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({
+      url: document.getElementById("ha-url").value,
+      token: document.getElementById("ha-token").value,
+    }),
+  });
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    haMessage(payload.error || "Could not save Home Assistant.");
+    return;
+  }
+  document.getElementById("ha-token").value = "";
+  haMessage("Saved. Loading suggestions.");
+  document.getElementById("ha-suggest").click();
+});
 document.getElementById("now").addEventListener("click", async () => {
   document.getElementById("now").disabled = true;
   await fetch("/api/check", {method: "POST"});
@@ -1224,6 +1669,69 @@ def update_settings():
         return jsonify(ok=False, error=str(exc)), 400
     _wake.set()
     return jsonify(saved)
+
+
+@app.get("/api/ha/discover")
+def ha_discover():
+    found = _discover_ha()
+    if not found:
+        return jsonify(ok=True, found=False, error="No Home Assistant answered on this network.")
+    return jsonify(ok=True, found=True, url=found[0]["url"], name=found[0].get("name") or "Home Assistant")
+
+
+@app.get("/api/ha/suggestions")
+def ha_suggestions():
+    cfg = _load_ha()
+    url = cfg["url"]
+    name = ""
+    if not url:
+        found = _discover_ha()
+        if found:
+            url = found[0]["url"]
+            name = found[0].get("name") or ""
+    public = {"url": url, "name": name, "token_set": bool(cfg["token"]), "esp": [], "other": []}
+    if not url:
+        return jsonify(ok=False, error="No Home Assistant found. Type its address.", **public), 404
+    if not _probe_ha(url):
+        return jsonify(ok=False, error="That address did not answer as Home Assistant.", **public), 404
+    if not cfg["token"]:
+        return jsonify(
+            ok=False,
+            error="Paste a long-lived access token from the Home Assistant profile page.",
+            **public,
+        ), 401
+    try:
+        devices = _ha_device_registry(url, cfg["token"])
+    except Exception as exc:
+        text = _redact(str(exc), cfg["token"])
+        if "timed out" in text.lower():
+            text = "Home Assistant stopped answering."
+        return jsonify(ok=False, error=text, **public), 502
+    taken_ips = set()
+    taken_names = set()
+    others, _err = _load_devices()
+    for item in others:
+        taken_ips.add(item["ip"])
+        taken_names.add(item["name"])
+    with _lock:
+        pings = list(_latest.get("pings") or [])
+    for row in pings:
+        if row.get("kind") == "cameras" and row.get("ip"):
+            taken_ips.add(row["ip"])
+    esp, other = _classify_ha_devices(devices, taken_ips, taken_names)
+    public["esp"] = esp
+    public["other"] = other
+    return jsonify(ok=True, error=None, **public)
+
+
+@app.post("/api/ha")
+def save_ha():
+    body = request.get_json(silent=True) or {}
+    try:
+        saved = _save_ha(body.get("url"), body.get("token"))
+    except ValueError as exc:
+        return jsonify(ok=False, error=str(exc)), 400
+    return jsonify(ok=True, **saved)
 
 
 @app.post("/api/devices")
