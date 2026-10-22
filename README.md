@@ -17,4 +17,6 @@ cp .env.example .env
 
 The page is on port 7852. `./update.sh` pulls and rebuilds.
 
+Checks start every 60 seconds until someone changes that on the page. Each check measures bitrate for 10 seconds, then sends 5 pings. The page can pause checks or set the gap from 30 seconds to 1 hour. That choice is stored in the database and kept across restarts. The page refreshes itself every few seconds, which is separate from the check gap.
+
 Device addresses live in `devices.json`.
