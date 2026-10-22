@@ -91,7 +91,7 @@ class HaTests(unittest.TestCase):
 
     def test_save_does_not_return_the_token(self):
         token = "x" * 40
-        app._probe_ha = lambda url: url == "http://192.0.2.5:8123"
+        app._working_ha_url = lambda url: url if url == "http://192.0.2.5:8123" else None
         client = app.app.test_client()
         response = client.post("/api/ha", json={"url": "http://192.0.2.5:8123", "token": token})
         body = response.get_json()
@@ -108,7 +108,7 @@ class HaTests(unittest.TestCase):
 
     def test_suggestions_without_a_token(self):
         os.environ["HA_URL"] = "http://192.0.2.5:8123"
-        app._probe_ha = lambda url: True
+        app._working_ha_url = lambda url: url
         app._discover_ha = lambda: [{"url": "http://192.0.2.9:8123", "name": "Should not be used"}]
         client = app.app.test_client()
         response = client.get("/api/ha/suggestions")
@@ -123,7 +123,7 @@ class HaTests(unittest.TestCase):
     def test_suggestions_groups_devices(self):
         os.environ["HA_URL"] = "http://192.0.2.5:8123"
         os.environ["HA_TOKEN"] = "y" * 30
-        app._probe_ha = lambda url: True
+        app._working_ha_url = lambda url: url
         app._ha_device_registry = lambda url, token: [
             {
                 "name": "Porch light",
@@ -140,6 +140,24 @@ class HaTests(unittest.TestCase):
         self.assertNotIn(os.environ["HA_TOKEN"], response.get_data(as_text=True))
         os.environ["HA_URL"] = ""
         os.environ["HA_TOKEN"] = ""
+
+    def test_http_falls_back_to_https(self):
+        def fake(url):
+            if url.startswith("https://192.0.2.5:8123/"):
+                return 200, "<title>Home Assistant</title>"
+            return None, ""
+
+        app._http_get = fake
+        self.assertEqual(app._working_ha_url("http://192.0.2.5:8123"), "https://192.0.2.5:8123")
+
+    def test_plain_401_still_counts(self):
+        def fake(url):
+            if url.endswith("/auth/providers"):
+                return 200, '{"providers":[{"type":"homeassistant"}]}'
+            return 401, "401: Unauthorized"
+
+        app._http_get = fake
+        self.assertEqual(app._working_ha_url("https://192.0.2.5:8123"), "https://192.0.2.5:8123")
 
     def test_redact_and_reject_short_token(self):
         self.assertNotIn("secret-token-value", app._redact("failed secret-token-value", "secret-token-value"))

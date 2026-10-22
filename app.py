@@ -553,8 +553,10 @@ def _save_ha(url, token):
         token = str(token).strip()
     if len(token) < 20:
         raise ValueError("Paste a long-lived access token from the Home Assistant profile page.")
-    if not _probe_ha(url):
+    working = _working_ha_url(url)
+    if not working:
         raise ValueError("That address did not answer as Home Assistant.")
+    url = working
     DATA.mkdir(parents=True, exist_ok=True)
     temporary = HA_FILE.with_suffix(".json.tmp")
     temporary.write_text(json.dumps({"url": url, "token": token}) + "\n")
@@ -569,19 +571,58 @@ def _redact(text, token):
     return text[:300]
 
 
-def _probe_ha(url):
+def _http_get(url):
     # Home networks often use a certificate this container does not trust.
     context = ssl._create_unverified_context()
     try:
-        request_url = urllib.request.Request(url.rstrip("/") + "/api/", method="GET")
+        request_url = urllib.request.Request(url, method="GET")
         with urllib.request.urlopen(request_url, timeout=4, context=context) as response:
-            body = response.read().decode(errors="replace")
-            return response.status == 200 and "API running" in body
+            return response.status, response.read(20000).decode(errors="replace")
     except urllib.error.HTTPError as exc:
-        body = exc.read().decode(errors="replace")
-        return exc.code == 401 and "API running" in body
+        return exc.code, exc.read(20000).decode(errors="replace")
     except (OSError, urllib.error.URLError):
+        return None, ""
+
+
+def _looks_like_ha(status, body):
+    if not status:
         return False
+    if "API running" in body:
+        return True
+    return "<title>Home Assistant</title>" in body
+
+
+def _working_ha_url(url):
+    """Return the URL Home Assistant answered on.
+
+    Some installs listen with TLS on the usual port and do not answer plain HTTP.
+    Current Home Assistant also answers /api/ with a plain 401, so the page title
+    or the login providers are enough to recognize it.
+    """
+    try:
+        cleaned = _clean_ha_url(url)
+    except ValueError:
+        return None
+    candidates = [cleaned]
+    if cleaned.startswith("http://"):
+        candidates.append("https://" + cleaned[len("http://"):])
+    for candidate in candidates:
+        base = candidate.rstrip("/")
+        status, body = _http_get(base + "/")
+        if _looks_like_ha(status, body):
+            return candidate
+        status, body = _http_get(base + "/api/")
+        if _looks_like_ha(status, body):
+            return candidate
+        if status == 401:
+            provider_status, providers = _http_get(base + "/auth/providers")
+            if provider_status == 200 and "homeassistant" in providers:
+                return candidate
+    return None
+
+
+def _probe_ha(url):
+    return _working_ha_url(url) is not None
 
 
 def _ha_from_service(info):
@@ -648,8 +689,9 @@ def _discover_ha():
         return found
     ip = _resolve_ipv4("homeassistant.local")
     url = f"http://{ip}:8123" if ip else ""
-    if url and _probe_ha(url):
-        return [{"url": url, "name": "Home Assistant"}]
+    working = _working_ha_url(url) if url else None
+    if working:
+        return [{"url": working, "name": "Home Assistant"}]
     return []
 
 
@@ -1692,8 +1734,11 @@ def ha_suggestions():
     public = {"url": url, "name": name, "token_set": bool(cfg["token"]), "esp": [], "other": []}
     if not url:
         return jsonify(ok=False, error="No Home Assistant found. Type its address.", **public), 404
-    if not _probe_ha(url):
+    working = _working_ha_url(url)
+    if not working:
         return jsonify(ok=False, error="That address did not answer as Home Assistant.", **public), 404
+    url = working
+    public["url"] = url
     if not cfg["token"]:
         return jsonify(
             ok=False,
