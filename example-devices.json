@@ -1,8 +1,4 @@
 {
-  "cameras": [
-    {"name": "front_door", "ip": "192.168.1.20"},
-    {"name": "back_yard", "ip": "192.168.1.21"}
-  ],
   "other": [
     {"name": "garage-sensor", "ip": "192.168.1.30"},
     {"name": "kitchen-display", "ip": "192.168.1.31"}

@@ -36,7 +36,24 @@ PRESETS = (30, 60, 120, 300, 900)
 # Runs on the Frigate machine. Prints one JSON object and nothing else.
 REMOTE = r"""
 import json, subprocess, time
+from urllib.parse import urlparse
 SAMPLE = int(%(sample)d)
+
+def host_of(url):
+    if not isinstance(url, str):
+        return None
+    target = url
+    if target.startswith("ffmpeg:"):
+        target = target.split("ffmpeg:", 1)[1].split("#", 1)[0]
+    if "://" not in target:
+        return None
+    try:
+        host = urlparse(target).hostname
+    except Exception:
+        return None
+    if not host or host in ("127.0.0.1", "localhost") or "@" in host or "/" in host:
+        return None
+    return host
 
 def grab():
     raw = subprocess.check_output(
@@ -49,9 +66,14 @@ def grab():
         if "://" in name or "@" in name:
             continue
         recv = 0
+        ip = None
         for prod in stream.get("producers") or []:
+            if not isinstance(prod, dict):
+                continue
             recv += prod.get("bytes_recv") or 0
-        out[name] = {"bytes": recv, "consumers": len(stream.get("consumers") or [])}
+            if ip is None:
+                ip = host_of(prod.get("url"))
+        out[name] = {"bytes": recv, "consumers": len(stream.get("consumers") or []), "ip": ip}
     return out
 
 def fps():
@@ -84,11 +106,22 @@ for name in sorted(second):
         "mbps": round(mbps, 3),
         "consumers": second[name]["consumers"],
     })
+rates = fps()
+cameras = []
+for name in sorted(rates):
+    if "://" in name or "@" in name:
+        continue
+    ip = second.get(name, {}).get("ip") or second.get(name + "_sub", {}).get("ip") or second.get(name + "_main", {}).get("ip")
+    item = {"name": name}
+    if ip:
+        item["ip"] = ip
+    cameras.append(item)
 print(json.dumps({
     "streams": rows,
     "total_mbps": round(total, 3),
-    "fps": fps(),
+    "fps": rates,
     "frigate": health(),
+    "cameras": cameras,
 }))
 """
 
@@ -232,10 +265,10 @@ def _load_devices():
     except Exception as exc:
         return [], str(exc)
     devices = []
-    # "esp" is the old key. Those entries are just other hosts to ping.
-    for key, kind in (("cameras", "cameras"), ("other", "other"), ("esp", "other")):
+    # Cameras come from Frigate. "esp" is the old key for the other list.
+    for key in ("other", "esp"):
         for item in data.get(key) or []:
-            devices.append({"kind": kind, "name": item["name"], "ip": item["ip"]})
+            devices.append({"kind": "other", "name": item["name"], "ip": item["ip"]})
     return devices, None
 
 
@@ -271,7 +304,30 @@ def _ssh_sample():
     return json.loads(line)
 
 
+def _clean_cameras(remote):
+    cameras = []
+    for item in remote.get("cameras") or []:
+        if not isinstance(item, dict):
+            continue
+        name = item.get("name")
+        ip = item.get("ip")
+        if not isinstance(name, str) or "://" in name or "@" in name:
+            continue
+        if ip is not None and (not isinstance(ip, str) or "://" in ip or "@" in ip or "/" in ip):
+            continue
+        cameras.append({"kind": "cameras", "name": name, "ip": ip})
+    return cameras
+
+
 def _ping_one(device):
+    if not device.get("ip"):
+        return {
+            "kind": device["kind"],
+            "name": device["name"],
+            "ip": None,
+            "loss": None,
+            "avg_ms": None,
+        }
     proc = subprocess.run(
         ["ping", "-n", "-c", "5", "-W", "1", "-q", device["ip"]],
         text=True,
@@ -303,10 +359,11 @@ def _ping_one(device):
     }
 
 
-def _ping_all():
-    devices, err = _load_devices()
+def _ping_all(cameras):
+    others, err = _load_devices()
     if err:
         return [], err
+    devices = list(cameras) + others
     from concurrent.futures import ThreadPoolExecutor
 
     with ThreadPoolExecutor(max_workers=8) as pool:
@@ -373,7 +430,7 @@ def _sample_once():
     at = at_dt.strftime("%Y-%m-%d %H:%M:%S")
     try:
         remote = _ssh_sample()
-        pings, ping_err = _ping_all()
+        pings, ping_err = _ping_all(_clean_cameras(remote))
         payload = {
             "ok": True,
             "error": ping_err,
@@ -630,7 +687,7 @@ PAGE = r"""<!doctype html>
     </article>
     <article class="card">
       <h2>Cameras</h2>
-      <p class="note">How the cameras answer a ping, separate from the bitrate above. Worst first. Five pings. A short sample can show 0% loss when a longer test would not.</p>
+      <p class="note">Taken from Frigate on each check. The address is read on that machine and only the address is kept. Worst first. Five pings. A short sample can show 0% loss when a longer test would not.</p>
       <table>
         <thead><tr><th>Device</th><th class="num">Loss</th><th class="num">Avg reply</th></tr></thead>
         <tbody id="cameras"></tbody>
@@ -685,6 +742,7 @@ function streamParts(name) {
   return { label: base.replaceAll("_", " "), role: role };
 }
 function tone(row) {
+  if (row.loss == null) return "";
   if (row.loss >= 30) return "bad";
   if (row.loss >= 10) return "warn";
   if (row.avg_ms != null && row.avg_ms >= 400) return "warn";
@@ -699,18 +757,19 @@ function pingClass(row, field) {
   return "num";
 }
 function sortPings(rows) {
+  const lossOf = (row) => row.loss == null ? -1 : row.loss;
   return rows.slice().sort((a, b) => {
-    const loss = b.loss - a.loss;
+    const loss = lossOf(b) - lossOf(a);
     if (loss) return loss;
     return (b.avg_ms || 0) - (a.avg_ms || 0);
   });
 }
-function renderPings(id, rows) {
+function renderPings(id, rows, emptyText) {
   const body = document.getElementById(id);
   body.replaceChildren();
   if (!rows.length) {
     const tr = document.createElement("tr");
-    const td = cell("No pings in this check.", "");
+    const td = cell(emptyText || "No devices in this check.", "");
     td.colSpan = 3;
     tr.appendChild(td);
     body.appendChild(tr);
@@ -725,7 +784,7 @@ function renderPings(id, rows) {
     ip.textContent = row.ip;
     name.appendChild(ip);
     tr.appendChild(name);
-    tr.appendChild(cell(Math.round(row.loss) + "%", pingClass(row, "loss")));
+    tr.appendChild(cell(row.loss == null ? "—" : Math.round(row.loss) + "%", pingClass(row, "loss")));
     tr.appendChild(cell(row.avg_ms == null ? "—" : Math.round(row.avg_ms) + " ms", pingClass(row, "avg")));
     body.appendChild(tr);
   }
@@ -871,7 +930,7 @@ function render(data) {
   renderBanner(data);
   renderStreams(data);
   renderPings("other", (data.pings || []).filter(row => row.kind === "other" || row.kind === "esp"));
-  renderPings("cameras", (data.pings || []).filter(row => row.kind === "cameras"));
+  renderPings("cameras", (data.pings || []).filter(row => row.kind === "cameras"), "Frigate did not report any cameras.");
   renderTrouble(data);
   renderHistory(data.history || []);
 }

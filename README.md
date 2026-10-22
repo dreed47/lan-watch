@@ -7,6 +7,8 @@ Frigate pulls video from each camera it is using. On a busy wireless network tha
 - How much video Frigate is pulling, in megabits per second, from go2rtc's own byte counters.
 - Ping loss and reply time for the cameras, and for any other devices you list.
 
+The camera names and addresses come from Frigate over that same SSH connection. They are not stored in git. The address is taken from the stream on the Frigate machine, and only the address leaves that machine.
+
 The other devices do not have to be ESP boards. A sensor, a display, a garage controller, or any other host you care about can go in the same list.
 
 The bitrate is read over SSH from the machine that runs Frigate. This app does not see those packets on the wire, and camera stream URLs stay on the Frigate machine. Pings are sent from this container, so they still cross the wireless hop on the way to a Wi-Fi device.
@@ -22,7 +24,7 @@ cp example-devices.json devices.json
 
 `FRIGATE_HOST` is the machine running Frigate. `FRIGATE_USER` is the SSH user on that machine. `.env`, `ssh/`, and `devices.json` are not in git.
 
-`devices.json` has two lists, `cameras` and `other`. Each item is a `name` and an `ip`. An older file may say `esp` instead of `other`. That still works, and those entries show up as other devices. `example-devices.json` only shows the shape.
+`devices.json` is only the other-device list, under `other`. Each item is a `name` and an `ip`. An older file may say `esp` instead of `other`. That still works. A `cameras` list in that file is ignored, because the camera list comes from Frigate. `example-devices.json` shows the shape.
 
 The image copies `devices.json` when it builds. A list change needs `./restart_container.sh` before the page sees it.
 
