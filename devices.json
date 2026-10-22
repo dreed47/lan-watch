@@ -1,21 +1,74 @@
 {
   "cameras": [
-    {"name": "back_yard", "ip": "192.168.86.88"},
-    {"name": "basement", "ip": "192.168.86.58"},
-    {"name": "living_room", "ip": "192.168.86.184"},
-    {"name": "garage_tapo", "ip": "192.168.86.109"},
-    {"name": "front_porch_tapo", "ip": "192.168.86.179"},
-    {"name": "back_porch_tapo", "ip": "192.168.86.46"},
-    {"name": "lower_patio_tapo", "ip": "192.168.86.82"},
-    {"name": "side_yard_tapo", "ip": "192.168.86.84"}
+    {
+      "name": "back_yard",
+      "ip": "192.168.86.88"
+    },
+    {
+      "name": "basement",
+      "ip": "192.168.86.58"
+    },
+    {
+      "name": "living_room",
+      "ip": "192.168.86.184"
+    },
+    {
+      "name": "garage_tapo",
+      "ip": "192.168.86.109"
+    },
+    {
+      "name": "front_porch_tapo",
+      "ip": "192.168.86.179"
+    },
+    {
+      "name": "back_porch_tapo",
+      "ip": "192.168.86.46"
+    },
+    {
+      "name": "lower_patio_tapo",
+      "ip": "192.168.86.82"
+    },
+    {
+      "name": "side_yard_tapo",
+      "ip": "192.168.86.84"
+    }
   ],
   "esp": [
-    {"name": "garage-fans", "ip": "192.168.86.213"},
-    {"name": "ratgdo", "ip": "192.168.86.166"},
-    {"name": "rack-panel-leds", "ip": "192.168.86.118"},
-    {"name": "notify-speaker", "ip": "192.168.86.250"},
-    {"name": "tagreader-garage", "ip": "192.168.86.83"},
-    {"name": "parkasst", "ip": "192.168.86.85"},
-    {"name": "stairlights", "ip": "192.168.86.191"}
+    {
+      "name": "garage-fans",
+      "ip": "192.168.86.213"
+    },
+    {
+      "name": "ratgdo",
+      "ip": "192.168.86.166"
+    },
+    {
+      "name": "rack-panel-leds",
+      "ip": "192.168.86.118"
+    },
+    {
+      "name": "notify-speaker",
+      "ip": "192.168.86.250"
+    },
+    {
+      "name": "tagreader-garage",
+      "ip": "192.168.86.83"
+    },
+    {
+      "name": "parkasst",
+      "ip": "192.168.86.85"
+    },
+    {
+      "name": "stairlights",
+      "ip": "192.168.86.191"
+    },
+    {
+      "name": "tagreader-frontdoor",
+      "ip": "192.168.86.75"
+    },
+    {
+      "name": "tagreader-bedroom",
+      "ip": "192.168.86.74"
+    }
   ]
 }
