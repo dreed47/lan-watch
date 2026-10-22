@@ -1035,6 +1035,8 @@ PAGE = r"""<!doctype html>
   h2 { font-size: 0.98rem; margin: 0 0 0.15rem; }
   .sub, .note, .lead { color: var(--muted); margin: 0.2rem 0 0; }
   .lead { max-width: 44rem; margin-top: 0.7rem; color: #c8c8d0; }
+  a { color: var(--accent); }
+  .help-link { margin: 0.45rem 0 0; }
   .status { margin-top: 0.35rem; }
   .pill {
     display: inline-flex; align-items: center; gap: 0.4rem;
@@ -1134,6 +1136,7 @@ PAGE = r"""<!doctype html>
     <div>
       <h1>Frigate Load</h1>
       <p class="lead">Frigate Load measures the video your Wi-Fi cameras are sending to Frigate, and whether that traffic is making the rest of the network slow to answer.</p>
+      <p class="help-link"><a href="/help">If the cameras are slowing the network, see what to change.</a></p>
       <p class="sub" id="status">Loading the latest check.</p>
     </div>
     <div class="pill" id="frigate"><span class="dot"></span><span id="frigate-text">Frigate</span></div>
@@ -1432,13 +1435,19 @@ function renderStatus(data) {
   document.getElementById("now").disabled = !!state.checking;
 }
 function renderTrouble(data) {
+  const note = document.getElementById("trouble-note");
   const rows = (data.pings || []).filter(row => tone(row));
   text("trouble-count", String(rows.length));
+  note.replaceChildren();
   if (!rows.length) {
-    text("trouble-note", data.pings && data.pings.length ? "Nothing looks slow or lossy" : "Waiting for pings");
+    note.textContent = data.pings && data.pings.length ? "Nothing looks slow or lossy" : "Waiting for pings";
     return;
   }
-  text("trouble-note", rows.slice(0, 3).map(row => row.name).join(", "));
+  note.append(rows.slice(0, 3).map(row => row.name).join(", "));
+  const link = document.createElement("a");
+  link.href = "/help";
+  link.textContent = "See what to change.";
+  note.append(" ", link);
 }
 function syncControls(settings) {
   document.getElementById("enabled").checked = !!settings.enabled;
@@ -1881,6 +1890,87 @@ def check_now():
         _once = True
     _wake.set()
     return jsonify(ok=True)
+
+
+HELP = r"""<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>When the cameras slow the network — Frigate Load</title>
+<style>
+  :root {
+    --bg: #101114; --card: #191b20; --line: #2d313a; --text: #f2f2f3;
+    --muted: #a3a3ad; --accent: #9ec1ff;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 15px/1.5 system-ui, sans-serif; }
+  .wrap { max-width: 760px; margin: 0 auto; padding: 1.4rem 1.15rem 3rem; }
+  h1 { font-size: 1.35rem; font-weight: 650; letter-spacing: -0.02em; margin: 0.4rem 0 0.4rem; }
+  h2 { font-size: 1.02rem; margin: 1.4rem 0 0.35rem; }
+  p { margin: 0.4rem 0; }
+  a { color: var(--accent); }
+  .back { color: var(--muted); font-size: 0.9rem; }
+  ul { margin: 0.3rem 0 0.6rem; padding-left: 1.15rem; }
+  li { margin: 0.35rem 0; }
+  .src { color: var(--muted); }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <a class="back" href="/">Frigate Load</a>
+  <h1>When the cameras slow the network</h1>
+  <p>The number on the main page is the video Frigate is receiving. The ping tables are whether other devices are slow to answer. A few lost pings in one check are a hint. Compare a stretch with the cameras on against a stretch with them off before changing the network.</p>
+  <p>Pausing checks here only pauses this page. Frigate keeps pulling until a camera is turned off or Frigate is stopped.</p>
+
+  <h2>Pull less video</h2>
+  <ul>
+    <li><strong>Wire the cameras.</strong> Frigate's own hardware guide says Wi-Fi cameras drop more often, and it gets worse as you add them. A cable takes that camera off the air. <a href="https://docs.frigate.video/frigate/hardware">Recommended hardware</a></li>
+    <li><strong>Open each camera once.</strong> Point detection and recording at Frigate's restream so live view, detection, and recording share one connection. A second app pointed at the camera opens another stream. <a href="https://docs.frigate.video/configuration/restream/">Restream</a> · <a href="https://docs.frigate.video/configuration/cameras">Camera configuration</a></li>
+    <li><strong>Detect on the small stream, at 5 fps.</strong> Frigate's default detect rate is 5, and it does not need to match the camera. Use the camera's sub stream for detection. <a href="https://docs.frigate.video/frigate/camera_setup">Camera setup</a></li>
+    <li><strong>Record a smaller stream if Wi-Fi is the problem.</strong> The record role is usually the heavy pull, and it is often the camera's main stream. Recording the sub stream, or a mid stream, is the cut that shows up on this page. <a href="https://docs.frigate.video/configuration/record/">Recording</a></li>
+    <li><strong>Keep motion-only video for disk space.</strong> That still leaves the camera sending the whole time it is enabled. <a href="https://docs.frigate.video/configuration/record/">Recording retention</a></li>
+    <li><strong>Turn the camera off to stop the pull.</strong> The camera switch in Frigate's live view does that. Turning off only object detection leaves the stream connected. <a href="https://docs.frigate.video/usage/live">Live view</a></li>
+    <li><strong>Leave live view on smart streaming.</strong> That is Frigate's default: a still image until something moves. Continuous streaming spends more. <a href="https://docs.frigate.video/configuration/live">Live view configuration</a></li>
+  </ul>
+
+  <h2>The Wi-Fi around the cameras</h2>
+  <ul>
+    <li>Use 5 GHz when the camera supports it. 2.4 GHz is shared with the small devices that cannot move.</li>
+    <li>Put fewer cameras on each radio. Several cameras on one 2.4 GHz channel compete with everything else on that channel.</li>
+    <li>Keep the access point near the cameras. Use a wire for the access point's own uplink. A wireless hop sends every frame across the air twice.</li>
+    <li>Limit a camera on the access point that serves it. A limit on the Frigate machine's wired port applies after the Wi-Fi hop, so the airtime is already spent.</li>
+  </ul>
+
+  <h2>Easy things to misread</h2>
+  <ul>
+    <li>A quiet minute is not a ceiling. The number moves when someone opens a live view or a camera reconnects.</li>
+    <li>Five pings is a spot check. A device can look fine here and still lose packets over a longer test.</li>
+    <li>A quality slider in the camera app often changes only the high-resolution stream. If Frigate is pulling a smaller stream, that slider will not move the number on this page.</li>
+    <li>Raising detect fps to match the camera spends more and is rarely useful. Frigate says 5 is right for almost all cameras. <a href="https://docs.frigate.video/frigate/camera_setup">Choosing a detect frame rate</a></li>
+  </ul>
+
+  <h2>Frigate's docs</h2>
+  <ul>
+    <li><a href="https://docs.frigate.video/frigate/hardware">Cameras, including why Wi-Fi is a poor fit</a></li>
+    <li><a href="https://docs.frigate.video/frigate/camera_setup">Detect resolution and frame rate</a></li>
+    <li><a href="https://docs.frigate.video/frigate/video_pipeline">How a frame moves from the camera to a recording</a></li>
+    <li><a href="https://docs.frigate.video/configuration/restream/">One connection per camera</a></li>
+    <li><a href="https://docs.frigate.video/configuration/record/">What gets kept</a></li>
+    <li><a href="https://docs.frigate.video/configuration/live">Live view and bandwidth</a></li>
+    <li><a href="https://docs.frigate.video/troubleshooting/recordings">Recording problems</a></li>
+    <li><a href="https://docs.frigate.video/troubleshooting/faqs">FAQ</a></li>
+  </ul>
+  <p class="src">Frigate's pages describe their settings. The Wi-Fi notes above are the usual fixes when those settings are already in place and other devices are still slow.</p>
+</div>
+</body>
+</html>
+"""
+
+
+@app.get("/help")
+def help_page():
+    return HELP
 
 
 @app.get("/")

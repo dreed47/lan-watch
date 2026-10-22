@@ -165,6 +165,16 @@ class HaTests(unittest.TestCase):
         self.assertEqual(esp[0]["label"], "Garage Wall 1")
         self.assertEqual(esp[0]["ip"], "192.168.2.81")
 
+    def test_help_page_links_to_frigate(self):
+        client = app.app.test_client()
+        home = client.get("/")
+        self.assertIn(b'href="/help"', home.data)
+        page = client.get("/help")
+        self.assertEqual(page.status_code, 200)
+        self.assertIn(b"https://docs.frigate.video/frigate/hardware", page.data)
+        self.assertIn(b"https://docs.frigate.video/configuration/restream/", page.data)
+        self.assertIn(b"Wire the cameras.", page.data)
+
     def test_discover_uses_the_saved_address(self):
         os.environ["HA_URL"] = "http://192.0.2.5:8123"
         os.environ["HA_TOKEN"] = "z" * 30
