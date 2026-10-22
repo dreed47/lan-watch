@@ -1625,6 +1625,16 @@ function renderSuggestions(payload) {
   ];
   const any = groups.some(([, rows]) => rows.length);
   if (!any) return;
+  const toggle = document.createElement("button");
+  toggle.type = "button";
+  toggle.textContent = "Deselect all";
+  toggle.addEventListener("click", () => {
+    const boxes = [...box.querySelectorAll('input[type="checkbox"]')];
+    const select = boxes.some(input => !input.checked);
+    for (const input of boxes) input.checked = select;
+    toggle.textContent = select ? "Deselect all" : "Select all";
+  });
+  box.appendChild(toggle);
   for (const [title, rows] of groups) {
     if (!rows.length) continue;
     const heading = document.createElement("h3");
@@ -1676,7 +1686,15 @@ document.getElementById("ha-find").addEventListener("click", async () => {
   const payload = await response.json().catch(() => ({}));
   document.getElementById("ha-setup").hidden = false;
   if (payload.url) document.getElementById("ha-url").value = payload.url;
-  haMessage(payload.found ? "Found " + (payload.name || "Home Assistant") + ". Paste a long-lived token." : (payload.error || "No Home Assistant answered. Type its address."));
+  if (!payload.found) {
+    haMessage(payload.error || "No Home Assistant answered. Type its address.");
+    return;
+  }
+  let message = payload.source === "saved"
+    ? "Using the saved address. A network search cannot hear Home Assistant from inside Docker."
+    : "Found " + (payload.name || "Home Assistant") + " on the network.";
+  if (!payload.token_set) message += " Paste a long-lived token.";
+  haMessage(message);
 });
 document.getElementById("ha-suggest").addEventListener("click", async () => {
   haMessage("Asking Home Assistant.");
@@ -1755,10 +1773,33 @@ def update_settings():
 
 @app.get("/api/ha/discover")
 def ha_discover():
+    cfg = _load_ha()
+    if cfg["url"]:
+        working = _working_ha_url(cfg["url"])
+        if working:
+            return jsonify(
+                ok=True,
+                found=True,
+                url=working,
+                name="Home Assistant",
+                source="saved",
+                token_set=bool(cfg["token"]),
+            )
     found = _discover_ha()
-    if not found:
-        return jsonify(ok=True, found=False, error="No Home Assistant answered on this network.")
-    return jsonify(ok=True, found=True, url=found[0]["url"], name=found[0].get("name") or "Home Assistant")
+    if found:
+        return jsonify(
+            ok=True,
+            found=True,
+            url=found[0]["url"],
+            name=found[0].get("name") or "Home Assistant",
+            source="network",
+            token_set=bool(cfg["token"]),
+        )
+    return jsonify(
+        ok=True,
+        found=False,
+        error="No announcement reached this app. Docker often cannot hear Home Assistant on the network. Type the address.",
+    )
 
 
 @app.get("/api/ha/suggestions")

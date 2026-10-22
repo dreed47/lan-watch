@@ -165,6 +165,21 @@ class HaTests(unittest.TestCase):
         self.assertEqual(esp[0]["label"], "Garage Wall 1")
         self.assertEqual(esp[0]["ip"], "192.168.2.81")
 
+    def test_discover_uses_the_saved_address(self):
+        os.environ["HA_URL"] = "http://192.0.2.5:8123"
+        os.environ["HA_TOKEN"] = "z" * 30
+        app._working_ha_url = lambda url: "https://192.0.2.5:8123"
+        app._discover_ha = lambda: (_ for _ in ()).throw(AssertionError("network search"))
+        response = app.app.test_client().get("/api/ha/discover")
+        body = response.get_json()
+        self.assertTrue(body["found"])
+        self.assertEqual(body["source"], "saved")
+        self.assertEqual(body["url"], "https://192.0.2.5:8123")
+        self.assertTrue(body["token_set"])
+        self.assertNotIn(os.environ["HA_TOKEN"], response.get_data(as_text=True))
+        os.environ["HA_URL"] = ""
+        os.environ["HA_TOKEN"] = ""
+
     def test_http_falls_back_to_https(self):
         def fake(url):
             if url.startswith("https://192.0.2.5:8123/"):
