@@ -1,22 +1,31 @@
 # LAN watch
 
-A small page for the camera pull into Frigate and for ping loss to the ESP devices.
+A page for how much video Frigate is pulling from the cameras, and for ping loss to those cameras and to ESP devices.
 
-The bitrate comes from go2rtc's byte counter on the Beelink. This app SSHes to that machine and reads the counter. A container on another computer cannot see those packets on the wire. Pings are sent from this container. They still cross the Eero on the last hop, so loss and delay still show the Wi-Fi.
+The bitrate comes from go2rtc's byte counter on the Beelink. This app SSHes there and reads the counter. It does not see the packets on the wire. Stream URLs stay on the Beelink. Pings are sent from this container.
 
-`update.sh` and `restart_container.sh` are the same operational scripts as [printer-flush-app](https://github.com/dreed47/printer-flush-app). The Docker health check hits `/health`.
-
-## Run
+## Setup
 
 ```sh
 cp .env.example .env
-# ssh/id_ed25519 is a key authorized for david@192.168.86.16
-# It is not in git.
+cp example-devices.json devices.json
+# Edit devices.json. Put a private key at ssh/id_ed25519 for BEELINK_USER.
 ./restart_container.sh
 ```
 
-The page is on port 7852. `./update.sh` pulls and rebuilds.
+`.env` and `ssh/` are not in git. `devices.json` is the real camera and ESP list, and it is not in git either. `example-devices.json` only shows the shape: a `cameras` list and an `esp` list, each item a `name` and an `ip`.
 
-Checks start every 60 seconds until someone changes that on the page. Each check measures bitrate for 10 seconds, then sends 5 pings. The page can pause checks or set the gap from 30 seconds to 1 hour. That choice is stored in the database and kept across restarts. The page refreshes itself every few seconds, which is separate from the check gap.
+The image copies `devices.json` when it builds. A list change needs `./restart_container.sh` before the page sees it.
 
-Device addresses live in `devices.json`.
+The page listens on port 7852. Inside the container the app uses port 5000. The Docker health check calls `/health`.
+
+Checks start every 60 seconds until someone changes that on the page. Each check measures bitrate for 10 seconds, then sends 5 pings. The page can pause checks or set the gap from 30 seconds to 1 hour. That choice is stored in `data/lan-watch.db` and kept across restarts. The page refreshes itself every few seconds. That refresh is separate from the check gap.
+
+## Update
+
+```sh
+./update.sh
+./update.sh --no-cache
+```
+
+`update.sh` pulls, then rebuilds. `restart_container.sh` rebuilds without pulling.
