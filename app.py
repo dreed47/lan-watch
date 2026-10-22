@@ -412,6 +412,15 @@ def _usable_ipv4(value):
     return True
 
 
+def _is_private_ipv4(value):
+    if not _usable_ipv4(value):
+        return False
+    first, second = (int(part) for part in value.split(".", 2)[:2])
+    if first == 10 or (first == 192 and second == 168):
+        return True
+    return first == 172 and 16 <= second <= 31
+
+
 def _resolve_ipv4(host):
     if not host or host in ("localhost",):
         return None
@@ -486,20 +495,54 @@ def _is_esp_device(device):
 
 
 def _classify_ha_devices(devices, taken_ips, taken_names):
-    esp = []
-    other = []
-    used_names = set(taken_names)
+    pending = []
     for device in devices or []:
         if not isinstance(device, dict) or device.get("disabled_by"):
             continue
         host = _host_from_url(device.get("configuration_url"))
         ip = _resolve_ipv4(host)
-        if not ip or ip in taken_ips:
+        # Cloud integrations publish public addresses. Those are not LAN devices.
+        if not ip or not _is_private_ipv4(ip) or ip in taken_ips:
             continue
         label = device.get("name_by_user") or device.get("name") or host
         slug = _slug_name(label)
         if not slug:
             continue
+        detail = device.get("model") or device.get("manufacturer") or ""
+        if detail == label:
+            detail = ""
+        pending.append({
+            "label": str(label),
+            "slug": slug,
+            "ip": ip,
+            "detail": str(detail),
+            "esp": _is_esp_device(device),
+            "user_named": bool(device.get("name_by_user")),
+        })
+    # Home Assistant often lists one device twice. Keep one row, and call it
+    # an ESP device if either entry is one.
+    chosen = {}
+    order = []
+    for item in pending:
+        current = chosen.get(item["ip"])
+        if current is None:
+            chosen[item["ip"]] = item
+            order.append(item["ip"])
+            continue
+        if item["esp"]:
+            current["esp"] = True
+            if item["detail"] and not current["detail"]:
+                current["detail"] = item["detail"]
+        if item["user_named"] and not current["user_named"]:
+            current["label"] = item["label"]
+            current["slug"] = item["slug"]
+            current["user_named"] = True
+    esp = []
+    other = []
+    used_names = set(taken_names)
+    for ip in order:
+        item = chosen[ip]
+        slug = item["slug"]
         name = slug
         suffix = 2
         while name in used_names:
@@ -508,11 +551,8 @@ def _classify_ha_devices(devices, taken_ips, taken_names):
             suffix += 1
         used_names.add(name)
         taken_ips.add(ip)
-        detail = device.get("model") or device.get("manufacturer") or ""
-        if detail == label:
-            detail = ""
-        item = {"name": name, "label": str(label), "ip": ip, "detail": str(detail)}
-        (esp if _is_esp_device(device) else other).append(item)
+        row = {"name": name, "label": item["label"], "ip": ip, "detail": item["detail"]}
+        (esp if item["esp"] else other).append(row)
     esp.sort(key=lambda item: item["label"].lower())
     other.sort(key=lambda item: item["label"].lower())
     return esp, other

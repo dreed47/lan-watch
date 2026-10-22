@@ -27,19 +27,19 @@ class HaTests(unittest.TestCase):
                 "name": "Porch light",
                 "manufacturer": "espressif",
                 "model": "esp32",
-                "configuration_url": "http://192.0.2.20:80",
+                "configuration_url": "http://192.168.2.20:80",
                 "identifiers": [["esphome", "aa"]],
             },
             {
                 "name": "Speaker",
                 "manufacturer": "Sonos",
                 "model": "One",
-                "configuration_url": "http://192.0.2.21",
+                "configuration_url": "http://192.168.2.21",
                 "identifiers": [["sonos", "bb"]],
             },
             {
                 "name": "Already",
-                "configuration_url": "http://192.0.2.10",
+                "configuration_url": "http://192.168.2.10",
                 "identifiers": [["esphome", "cc"]],
             },
             {
@@ -54,20 +54,20 @@ class HaTests(unittest.TestCase):
             {
                 "disabled_by": "user",
                 "name": "Off",
-                "configuration_url": "http://192.0.2.22",
+                "configuration_url": "http://192.168.2.22",
                 "identifiers": [["esphome", "ff"]],
             },
         ]
-        esp, other = app._classify_ha_devices(devices, {"192.0.2.10"}, {"garage-fans"})
+        esp, other = app._classify_ha_devices(devices, {"192.168.2.10"}, {"garage-fans"})
         self.assertEqual([item["name"] for item in esp], ["porch-light"])
-        self.assertEqual(esp[0]["ip"], "192.0.2.20")
+        self.assertEqual(esp[0]["ip"], "192.168.2.20")
         self.assertEqual([item["name"] for item in other], ["speaker"])
         self.assertEqual(other[0]["detail"], "One")
 
     def test_name_collision_gets_a_suffix(self):
         devices = [
-            {"name": "Fan", "configuration_url": "http://192.0.2.30", "identifiers": [["esphome", "1"]]},
-            {"name": "Fan", "configuration_url": "http://192.0.2.31", "identifiers": [["esphome", "2"]]},
+            {"name": "Fan", "configuration_url": "http://192.168.2.30", "identifiers": [["esphome", "1"]]},
+            {"name": "Fan", "configuration_url": "http://192.168.2.31", "identifiers": [["esphome", "2"]]},
         ]
         esp, other = app._classify_ha_devices(devices, set(), {"fan"})
         self.assertEqual([item["name"] for item in esp], ["fan-2", "fan-3"])
@@ -127,7 +127,7 @@ class HaTests(unittest.TestCase):
         app._ha_device_registry = lambda url, token: [
             {
                 "name": "Porch light",
-                "configuration_url": "http://192.0.2.20",
+                "configuration_url": "http://192.168.2.20",
                 "identifiers": [["esphome", "aa"]],
                 "model": "esp32",
             }
@@ -136,10 +136,34 @@ class HaTests(unittest.TestCase):
         response = client.get("/api/ha/suggestions")
         body = response.get_json()
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(body["esp"][0]["ip"], "192.0.2.20")
+        self.assertEqual(body["esp"][0]["ip"], "192.168.2.20")
         self.assertNotIn(os.environ["HA_TOKEN"], response.get_data(as_text=True))
         os.environ["HA_URL"] = ""
         os.environ["HA_TOKEN"] = ""
+
+    def test_public_addresses_are_left_out(self):
+        devices = [
+            {"name": "Cloud", "configuration_url": "http://8.8.8.8", "manufacturer": "Example"},
+            {"name": "Lamp", "configuration_url": "http://192.168.2.40", "identifiers": [["esphome", "1"]]},
+        ]
+        esp, other = app._classify_ha_devices(devices, set(), set())
+        self.assertEqual([item["name"] for item in esp], ["lamp"])
+        self.assertEqual(other, [])
+
+    def test_duplicate_address_is_listed_as_esp(self):
+        devices = [
+            {"name": "Garage Wall 1", "configuration_url": "http://192.168.2.81", "identifiers": [["wled", "aa"]]},
+            {
+                "name": "wled board",
+                "configuration_url": "http://192.168.2.81",
+                "manufacturer": "Espressif",
+                "model": "esp32",
+            },
+        ]
+        esp, other = app._classify_ha_devices(devices, set(), set())
+        self.assertEqual(other, [])
+        self.assertEqual(esp[0]["label"], "Garage Wall 1")
+        self.assertEqual(esp[0]["ip"], "192.168.2.81")
 
     def test_http_falls_back_to_https(self):
         def fake(url):
