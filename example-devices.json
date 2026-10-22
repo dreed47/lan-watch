@@ -3,8 +3,8 @@
     {"name": "front_door", "ip": "192.168.1.20"},
     {"name": "back_yard", "ip": "192.168.1.21"}
   ],
-  "esp": [
+  "other": [
     {"name": "garage-sensor", "ip": "192.168.1.30"},
-    {"name": "tagreader", "ip": "192.168.1.31"}
+    {"name": "kitchen-display", "ip": "192.168.1.31"}
   ]
 }

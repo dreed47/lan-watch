@@ -1,19 +1,28 @@
 # LAN watch
 
-A page for how much video Frigate is pulling from the cameras, and for ping loss to those cameras and to ESP devices.
+A page for the effect of Frigate's camera streams on the Wi-Fi.
 
-The bitrate comes from go2rtc's byte counter on the Beelink. This app SSHes there and reads the counter. It does not see the packets on the wire. Stream URLs stay on the Beelink. Pings are sent from this container.
+Frigate pulls video from each camera it is using. On a busy wireless network that pull can crowd out other devices. This app shows two things side by side:
+
+- How much video Frigate is pulling, in megabits per second, from go2rtc's own byte counters.
+- Ping loss and reply time for the cameras, and for any other devices you list.
+
+The other devices do not have to be ESP boards. A sensor, a display, a garage controller, or any other host you care about can go in the same list.
+
+The bitrate is read over SSH from the machine that runs Frigate. This app does not see those packets on the wire, and camera stream URLs stay on the Frigate machine. Pings are sent from this container, so they still cross the wireless hop on the way to a Wi-Fi device.
 
 ## Setup
 
 ```sh
 cp .env.example .env
 cp example-devices.json devices.json
-# Edit devices.json. Put a private key at ssh/id_ed25519 for BEELINK_USER.
+# Edit .env and devices.json. Put a private key at ssh/id_ed25519 for FRIGATE_USER.
 ./restart_container.sh
 ```
 
-`.env` and `ssh/` are not in git. `devices.json` is the real camera and ESP list, and it is not in git either. `example-devices.json` only shows the shape: a `cameras` list and an `esp` list, each item a `name` and an `ip`.
+`FRIGATE_HOST` is the machine running Frigate. `FRIGATE_USER` is the SSH user on that machine. `.env`, `ssh/`, and `devices.json` are not in git.
+
+`devices.json` has two lists, `cameras` and `other`. Each item is a `name` and an `ip`. An older file may say `esp` instead of `other`. That still works, and those entries show up as other devices. `example-devices.json` only shows the shape.
 
 The image copies `devices.json` when it builds. A list change needs `./restart_container.sh` before the page sees it.
 

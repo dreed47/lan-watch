@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""LAN watch: Frigate pull from the Beelink, plus ping loss for cameras and ESPs.
+"""LAN watch: how much video Frigate is pulling, and ping loss around it.
 
-The bitrate is go2rtc's own byte counter on the Beelink. This app SSHes there
-and asks for it. It does not sniff the network. Stream URLs are stripped on
-the Beelink before anything is printed, because those URLs contain the camera
-password.
+The bitrate is go2rtc's own byte counter on the Frigate machine. This app SSHes
+there and asks for it. It does not sniff the network. Stream URLs are stripped
+on that machine before anything is printed, because those URLs contain the
+camera password.
 """
 
 import json
@@ -19,8 +19,9 @@ from zoneinfo import ZoneInfo
 
 from flask import Flask, jsonify, request
 
-BEELINK_HOST = os.environ.get("BEELINK_HOST", "192.168.86.16")
-BEELINK_USER = os.environ.get("BEELINK_USER", "david")
+# FRIGATE_HOST is the machine running Frigate. BEELINK_* is the previous name.
+FRIGATE_HOST = os.environ.get("FRIGATE_HOST") or os.environ.get("BEELINK_HOST") or ""
+FRIGATE_USER = os.environ.get("FRIGATE_USER") or os.environ.get("BEELINK_USER") or ""
 SSH_KEY = os.environ.get("SSH_KEY", "/run/ssh/id_ed25519")
 POLL_SECONDS = int(os.environ.get("POLL_SECONDS", "60"))
 SAMPLE_SECONDS = int(os.environ.get("SAMPLE_SECONDS", "10"))
@@ -32,7 +33,7 @@ POLL_MIN = 30
 POLL_MAX = 3600
 PRESETS = (30, 60, 120, 300, 900)
 
-# Runs on the Beelink. Prints one JSON object and nothing else.
+# Runs on the Frigate machine. Prints one JSON object and nothing else.
 REMOTE = r"""
 import json, subprocess, time
 SAMPLE = int(%(sample)d)
@@ -231,13 +232,16 @@ def _load_devices():
     except Exception as exc:
         return [], str(exc)
     devices = []
-    for kind in ("esp", "cameras"):
-        for item in data.get(kind, []):
+    # "esp" is the old key. Those entries are just other hosts to ping.
+    for key, kind in (("cameras", "cameras"), ("other", "other"), ("esp", "other")):
+        for item in data.get(key) or []:
             devices.append({"kind": kind, "name": item["name"], "ip": item["ip"]})
     return devices, None
 
 
 def _ssh_sample():
+    if not FRIGATE_HOST or not FRIGATE_USER:
+        raise RuntimeError("Set FRIGATE_HOST and FRIGATE_USER")
     script = REMOTE % {"sample": SAMPLE_SECONDS}
     cmd = [
         "ssh",
@@ -247,7 +251,7 @@ def _ssh_sample():
         "-o", "StrictHostKeyChecking=accept-new",
         "-o", "UserKnownHostsFile=/data/known_hosts",
         "-o", "ConnectTimeout=8",
-        f"{BEELINK_USER}@{BEELINK_HOST}",
+        f"{FRIGATE_USER}@{FRIGATE_HOST}",
         "python3", "-",
     ]
     proc = subprocess.run(
@@ -259,7 +263,7 @@ def _ssh_sample():
     )
     if proc.returncode != 0:
         err = (proc.stderr or proc.stdout or "ssh failed").strip()
-        err = err.replace(BEELINK_HOST, "beelink")
+        err = err.replace(FRIGATE_HOST, "frigate-host")
         raise RuntimeError(err.splitlines()[-1][:300])
     line = proc.stdout.strip().splitlines()[-1]
     if "://" in line or ("@" in line and "rtsp" in line.lower()):
@@ -470,7 +474,8 @@ PAGE = r"""<!doctype html>
   header { display: flex; justify-content: space-between; gap: 1rem; align-items: flex-end; flex-wrap: wrap; }
   h1 { font-size: 1.35rem; font-weight: 650; letter-spacing: -0.02em; margin: 0; }
   h2 { font-size: 0.98rem; margin: 0 0 0.15rem; }
-  .sub, .note { color: var(--muted); margin: 0.2rem 0 0; }
+  .sub, .note, .lead { color: var(--muted); margin: 0.2rem 0 0; }
+  .lead { max-width: 44rem; margin-top: 0.7rem; color: #c8c8d0; }
   .status { margin-top: 0.35rem; }
   .pill {
     display: inline-flex; align-items: center; gap: 0.4rem;
@@ -558,6 +563,7 @@ PAGE = r"""<!doctype html>
   <header>
     <div>
       <h1>LAN watch</h1>
+      <p class="lead">Use this to see whether Frigate's camera streams are loading the Wi-Fi. The number is how much video Frigate is pulling. The tables are ping loss and reply time for the cameras, and for any other devices you want to watch. Those other devices do not have to be ESP boards.</p>
       <p class="sub" id="status">Loading the latest check.</p>
     </div>
     <div class="pill" id="frigate"><span class="dot"></span><span id="frigate-text">Frigate</span></div>
@@ -584,7 +590,7 @@ PAGE = r"""<!doctype html>
     <article class="stat">
       <div class="k">Camera pull</div>
       <div class="v" id="total">—</div>
-      <p class="note" id="total-note"></p>
+      <p class="note" id="total-note">Video Frigate is taking from the cameras.</p>
     </article>
     <article class="stat">
       <div class="k">Streams pulling</div>
@@ -600,7 +606,7 @@ PAGE = r"""<!doctype html>
 
   <section class="card wide">
     <h2>Streams</h2>
-    <p class="note">Sorted by bitrate. One viewer is Frigate holding the stream open.</p>
+    <p class="note">This is the camera traffic Frigate is holding open, sorted by bitrate. One viewer means Frigate itself. A live view adds another.</p>
     <table>
       <thead>
         <tr><th>Stream</th><th class="num">Mbps</th><th class="num">Viewers</th><th class="num">fps</th></tr>
@@ -615,16 +621,16 @@ PAGE = r"""<!doctype html>
 
   <section class="grid">
     <article class="card">
-      <h2>ESP devices</h2>
-      <p class="note">Worst first. Five pings from this container. Yellow is 10% loss or a reply over 400 ms.</p>
+      <h2>Other devices</h2>
+      <p class="note">Anything else that shares the Wi-Fi: ESP boards, sensors, or other hosts. Worst first. Five pings from this container. Yellow is 10% loss or a reply over 400 ms.</p>
       <table>
         <thead><tr><th>Device</th><th class="num">Loss</th><th class="num">Avg reply</th></tr></thead>
-        <tbody id="esp"></tbody>
+        <tbody id="other"></tbody>
       </table>
     </article>
     <article class="card">
       <h2>Cameras</h2>
-      <p class="note">Same five-ping check. A short sample can show 0% when a longer test would not.</p>
+      <p class="note">How the cameras answer a ping, separate from the bitrate above. Worst first. Five pings. A short sample can show 0% loss when a longer test would not.</p>
       <table>
         <thead><tr><th>Device</th><th class="num">Loss</th><th class="num">Avg reply</th></tr></thead>
         <tbody id="cameras"></tbody>
@@ -633,7 +639,7 @@ PAGE = r"""<!doctype html>
   </section>
 
   <section class="card wide">
-    <h2>Recent pull</h2>
+    <h2>Recent camera pull</h2>
     <p class="note" id="history-note">Newest on the right.</p>
     <div class="bars" id="bars"></div>
   </section>
@@ -831,7 +837,7 @@ function renderStatus(data) {
     totalEl.appendChild(unit);
   }
   const sample = settings.sample_seconds || 10;
-  text("total-note", "Measured over " + sample + " seconds" + (settings.enabled ? "" : " · checks paused"));
+  text("total-note", "Video Frigate took from the cameras over " + sample + " seconds" + (settings.enabled ? "" : " · checks paused"));
   document.getElementById("now").disabled = !!state.checking;
 }
 function renderTrouble(data) {
@@ -852,7 +858,7 @@ function syncControls(settings) {
   const input = document.getElementById("custom-seconds");
   if (document.activeElement !== input) input.value = settings.poll_seconds;
   const sample = settings.sample_seconds || 10;
-  text("hint", "A check measures camera pull for " + sample + " seconds, then pings every device. Checks start this often. The choice is saved on this server. The page itself refreshes every few seconds.");
+  text("hint", "Each check reads Frigate's camera pull for " + sample + " seconds, then pings every listed device. Checks start this often. The choice is saved on this server. The page itself refreshes every few seconds.");
 }
 function render(data) {
   latest = data;
@@ -864,7 +870,7 @@ function render(data) {
   renderStatus(data);
   renderBanner(data);
   renderStreams(data);
-  renderPings("esp", (data.pings || []).filter(row => row.kind === "esp"));
+  renderPings("other", (data.pings || []).filter(row => row.kind === "other" || row.kind === "esp"));
   renderPings("cameras", (data.pings || []).filter(row => row.kind === "cameras"));
   renderTrouble(data);
   renderHistory(data.history || []);
